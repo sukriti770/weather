@@ -1,0 +1,296 @@
+<!doctype html>
+<!--
+Dynamic Weather Dashboard
+Single-file HTML/CSS/JS dashboard that uses:
+ - OpenWeatherMap API (Current weather + 5 day / 3-hour forecast)
+ - Browser Geolocation API (with manual city fallback)
+
+USAGE:
+ 1. Get an API key from https://openweathermap.org/api and replace the string in `API_KEY` below.
+ 2. Serve this file from a secure origin (https:// or localhost) for Geolocation to work.
+ 3. Open the page and allow location access or type a city name.
+
+Notes:
+ - The API key must be kept private for public deployments. For production, proxy requests through a backend.
+ - Forecast uses the 3-hour forecast endpoint and groups by day for a simple day-by-day summary.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dynamic Weather Dashboard</title>
+  <style>
+    :root{
+      --bg:#0f1724; --card:#0b1220; --muted:#9aa4b2; --accent:#4cc9f0; --glass: rgba(255,255,255,0.03);
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;color:#e6eef6;background:linear-gradient(180deg,#071022 0%,#031025 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px}
+    .app{width:100%;max-width:980px}
+    header{display:flex;align-items:center;gap:16px;margin-bottom:20px}
+    .brand{display:flex;flex-direction:column}
+    .brand h1{margin:0;font-size:20px}
+    .brand p{margin:0;color:var(--muted);font-size:13px}
+
+    .panel{display:grid;grid-template-columns:360px 1fr;gap:18px}
+    .card{background:var(--card);padding:18px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6);backdrop-filter:blur(6px)}
+
+    .controls{display:flex;flex-direction:column;gap:12px}
+    .controls .row{display:flex;gap:8px}
+    input[type="text"]{flex:1;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:var(--glass);color:inherit}
+    button{padding:10px 12px;border-radius:8px;border:0;background:linear-gradient(90deg,var(--accent),#60d3ff);color:#012;cursor:pointer}
+
+    .now{display:flex;flex-direction:column;gap:8px;align-items:center;text-align:center}
+    .temp{font-size:56px;font-weight:700}
+    .desc{color:var(--muted);text-transform:capitalize}
+    .meta{display:flex;gap:10px;color:var(--muted);font-size:13px}
+
+    .forecast{display:flex;gap:10px;overflow-x:auto;padding-top:12px}
+    .day{min-width:110px;background:rgba(255,255,255,0.02);padding:10px;border-radius:10px;text-align:center}
+    .small{font-size:13px;color:var(--muted)}
+
+    .mapnote{font-size:13px;color:var(--muted);margin-top:6px}
+
+    /* responsive */
+    @media (max-width:880px){
+      .panel{grid-template-columns:1fr}
+      .now .temp{font-size:44px}
+    }
+
+    footer{color:var(--muted);font-size:13px;margin-top:12px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <h1>Dynamic Weather Dashboard</h1>
+        <p>Real-time, location-based weather & forecast</p>
+      </div>
+      <div style="margin-left:auto;color:var(--muted);font-size:13px">Source: OpenWeatherMap · Demo</div>
+    </header>
+
+    <div class="panel">
+      <div class="card">
+        <div class="controls">
+          <div class="row">
+            <input id="cityInput" type="text" placeholder="Enter city (e.g. New York)" />
+            <button id="searchBtn">Search</button>
+          </div>
+          <div class="row">
+            <button id="locBtn">Use my location</button>
+            <select id="unitSelect" aria-label="Units">
+              <option value="metric">Celsius (°C)</option>
+              <option value="imperial">Fahrenheit (°F)</option>
+              <option value="standard">Kelvin (K)</option>
+            </select>
+          </div>
+          <div id="status" class="small"></div>
+          <div class="mapnote">Note: Allow location access for best results. If denied, search by city name.</div>
+        </div>
+      </div>
+
+      <div class="card" id="weatherCard">
+        <div class="now" id="nowSection">
+          <div id="location" class="small">—</div>
+          <div id="temp" class="temp">--°</div>
+          <div id="condition" class="desc">—</div>
+          <div class="meta" id="metaRow"></div>
+        </div>
+
+        <div style="margin-top:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <strong>5-day forecast</strong>
+            <div class="small" id="updatedAt">—</div>
+          </div>
+          <div id="forecast" class="forecast" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+
+    <footer>Tips: Click "Use my location" or type a city name. Forecast groups the 3-hour points into daily summaries.</footer>
+  </div>
+
+  <script>
+    // --- CONFIG
+    const API_KEY = '15ce5eb27b1c606493b27b6a3db81c55'; // <-- PUT YOUR API KEY HERE
+    const API_BASE = 'https://api.openweathermap.org/data/2.5';
+
+    // --- SELECTORS
+    const statusEl = document.getElementById('status');
+    const locBtn = document.getElementById('locBtn');
+    const searchBtn = document.getElementById('searchBtn');
+    const cityInput = document.getElementById('cityInput');
+    const unitSelect = document.getElementById('unitSelect');
+
+    const locationEl = document.getElementById('location');
+    const tempEl = document.getElementById('temp');
+    const condEl = document.getElementById('condition');
+    const metaRow = document.getElementById('metaRow');
+    const forecastEl = document.getElementById('forecast');
+    const updatedAtEl = document.getElementById('updatedAt');
+
+    // --- UTILITIES
+    function setStatus(msg, err=false){ statusEl.textContent = msg; statusEl.style.color = err? '#ff9b9b': '' }
+    function formatTemp(t, unit){
+      if (unit === 'metric') return Math.round(t) + '°C';
+      if (unit === 'imperial') return Math.round(t) + '°F';
+      return Math.round(t) + 'K';
+    }
+
+    function getWeatherIconUrl(icon){ return `https://openweathermap.org/img/wn/${icon}@2x.png`; }
+
+    // --- FETCH HELPERS
+    async function fetchJson(url){
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Network response was not ok: '+res.status);
+      return res.json();
+    }
+
+    async function fetchByCoords(lat, lon, units='metric'){
+      setStatus('Loading weather...');
+      try{
+        const curr = await fetchJson(`${API_BASE}/weather?lat=${lat}&lon=${lon}&units=${units}&appid=${API_KEY}`);
+        const forecast = await fetchJson(`${API_BASE}/forecast?lat=${lat}&lon=${lon}&units=${units}&appid=${API_KEY}`);
+        renderWeather(curr, forecast, units);
+        setStatus('Updated');
+      }catch(err){
+        console.error(err);
+        setStatus('Failed to load weather. See console.', true);
+      }
+    }
+
+    async function fetchByCity(q, units='metric'){
+      setStatus('Searching city...');
+      try{
+        const curr = await fetchJson(`${API_BASE}/weather?q=${encodeURIComponent(q)}&units=${units}&appid=${API_KEY}`);
+        const {coord} = curr;
+        const forecast = await fetchJson(`${API_BASE}/forecast?lat=${coord.lat}&lon=${coord.lon}&units=${units}&appid=${API_KEY}`);
+        renderWeather(curr, forecast, units);
+        setStatus('Updated');
+      }catch(err){
+        console.error(err);
+        setStatus('City not found or API error.', true);
+      }
+    }
+
+    // --- RENDER
+    function renderWeather(curr, forecast, units){
+      const city = `${curr.name}${curr.sys && curr.sys.country ? ', ' + curr.sys.country : ''}`;
+      locationEl.textContent = city;
+      tempEl.textContent = formatTemp(curr.main.temp, units);
+      condEl.textContent = `${curr.weather[0].description}`;
+
+      // meta row: feels, humidity, wind
+      metaRow.innerHTML = '';
+      const feels = createMeta('Feels', formatTemp(curr.main.feels_like, units));
+      const hum = createMeta('Humidity', curr.main.humidity + '%');
+      const wind = createMeta('Wind', Math.round(curr.wind.speed) + (units==='metric'?' m/s':' mph'));
+      metaRow.appendChild(feels); metaRow.appendChild(hum); metaRow.appendChild(wind);
+
+      // forecast grouping by date (local date)
+      const groups = groupForecastByDay(forecast.list, forecast.city.timezone);
+      forecastEl.innerHTML = '';
+      for (const day of groups){
+        const node = document.createElement('div'); node.className='day';
+        const d = new Date(day.date);
+        const dayName = d.toLocaleDateString(undefined, {weekday:'short'});
+        node.innerHTML = `<div class="small"><strong>${dayName}</strong></div>`+
+                         `<div style="font-weight:700;font-size:18px;margin:8px 0">${Math.round(day.temp)}°</div>`+
+                         `<img src="${getWeatherIconUrl(day.icon)}" alt="" style="width:56px;height:56px">`+
+                         `<div class="small" style="margin-top:6px">${day.desc}</div>`+
+                         `<div class="small" style="margin-top:6px">H ${Math.round(day.temp_max)} · L ${Math.round(day.temp_min)}</div>`;
+        forecastEl.appendChild(node);
+      }
+
+      const updated = new Date();
+      updatedAtEl.textContent = 'Updated: ' + updated.toLocaleString();
+    }
+
+    function createMeta(label, value){
+      const el = document.createElement('div');
+      el.innerHTML = `<div style="font-size:12px;color:var(--muted)">${label}</div><div style="font-weight:600">${value}</div>`;
+      return el;
+    }
+
+    function groupForecastByDay(list, tzOffsetSeconds){
+      // tzOffsetSeconds: seconds to add to UTC to get local time in city
+      const days = {};
+      for (const p of list){
+        // p.dt is unix seconds
+        const localTs = (p.dt + (tzOffsetSeconds || 0)) * 1000;
+        const d = new Date(localTs);
+        const dayKey = d.toISOString().slice(0,10); // YYYY-MM-DD
+        if (!days[dayKey]) days[dayKey] = {temps:[], temp_max:-Infinity, temp_min:Infinity, icons:{}, date: d, descs: []};
+        days[dayKey].temps.push(p.main.temp);
+        days[dayKey].temp_max = Math.max(days[dayKey].temp_max, p.main.temp_max);
+        days[dayKey].temp_min = Math.min(days[dayKey].temp_min, p.main.temp_min);
+        const icon = p.weather[0].icon;
+        days[dayKey].icons[icon] = (days[dayKey].icons[icon] || 0) + 1;
+        days[dayKey].descs.push(p.weather[0].description);
+      }
+      // convert to array and pick most common icon + average temp
+      const out = Object.values(days).map(d => {
+        const icon = Object.entries(d.icons).sort((a,b)=>b[1]-a[1])[0][0];
+        const avg = d.temps.reduce((a,b)=>a+b,0)/d.temps.length;
+        // pick most frequent description (simple)
+        const descCounts = d.descs.reduce((acc,desc)=>{acc[desc]=(acc[desc]||0)+1;return acc},{})
+        const desc = Object.entries(descCounts).sort((a,b)=>b[1]-a[1])[0][0];
+        return {date: d.date, temp: avg, temp_max: d.temp_max, temp_min: d.temp_min, icon, desc};
+      });
+      // return next 5 days (including today)
+      return out.slice(0,5);
+    }
+
+    // --- EVENTS
+    locBtn.addEventListener('click', ()=>{
+      if (!navigator.geolocation){ setStatus('Geolocation not supported', true); return; }
+      setStatus('Getting location...');
+      navigator.geolocation.getCurrentPosition(async (pos)=>{
+        const {latitude, longitude} = pos.coords;
+        await fetchByCoords(latitude, longitude, unitSelect.value);
+      }, (err)=>{
+        console.error(err); setStatus('Location access denied or unavailable', true);
+      }, {timeout:10000});
+    });
+
+    searchBtn.addEventListener('click', ()=>{
+      const q = cityInput.value.trim();
+      if (!q) { setStatus('Please enter a city', true); return; }
+      fetchByCity(q, unitSelect.value);
+    });
+
+    unitSelect.addEventListener('change', ()=>{
+      // if we have a displayed location, re-fetch for new units
+      const locText = locationEl.textContent;
+      if (locText && locText !== '—'){
+        // if we have coordinates stored in dataset, use it; otherwise try by city name
+        const lat = locationEl.dataset.lat, lon = locationEl.dataset.lon, city = cityInput.value.trim();
+        if (lat && lon) fetchByCoords(lat, lon, unitSelect.value);
+        else if (city) fetchByCity(city, unitSelect.value);
+      }
+    });
+
+    // optional: press enter to search
+    cityInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') searchBtn.click(); });
+
+    // --- AUTO LOAD: try geolocation at start
+    (function init(){
+      // attempt to use navigator geolocation, but do not spam the user
+      if (navigator.geolocation){
+        navigator.permissions && navigator.permissions.query({name:'geolocation'})
+          .then(p=>{
+            if (p.state === 'granted') {
+              locBtn.click();
+            } else {
+              // keep UI idle; user can click
+              setStatus('Enter a city or click "Use my location"');
+            }
+          }).catch(_=>{
+            setStatus('Enter a city or click "Use my location"');
+          });
+      } else setStatus('Enter a city or click "Use my location"');
+    })();
+
+  </script>
+</body>
+</html>
